@@ -1,18 +1,3 @@
-// Project OldRod - A KoiVM devirtualisation utility.
-// Copyright (C) 2019 Washi
-// 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-// 
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-// 
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -125,7 +110,6 @@ namespace OldRod.Core.Disassembly.Inference
                        && ResolveUnknownExitKeys
                        && TryResolveExitKeys())
                 {
-                    // Try continuing the disassembly until no more changes are being observed.
                 }
             }
             catch (DisassemblyException ex) when (SalvageCfgOnError)
@@ -164,7 +148,6 @@ namespace OldRod.Core.Disassembly.Inference
             var initialStates = new List<ProgramState>();
             if (function.Instructions.Count == 0)
             {
-                // First run. We just start at the very beginning of the export.
                 Logger.Debug(Tag, $"Started disassembling function_{function.EntrypointAddress:X4}...");
                 var initialState = new ProgramState()
                 {
@@ -179,12 +162,7 @@ namespace OldRod.Core.Disassembly.Inference
             }
             else if (function.UnresolvedOffsets.Count > 0)
             {
-                // We still have some instructions were we could not fully resolve the next program states from.
-                // Currently the only reason for this to happen is when we disassembled a CALL instruction, and
-                // inferred that it called a method whose exit key was not yet known, and could therefore not
-                // continue disassembly.
 
-                // Continue disassembly at this position:
                 Logger.Debug(Tag,
                     $"Revisiting {function.UnresolvedOffsets.Count} unresolved offsets of function_{function.EntrypointAddress:X4}...");
                 foreach (long offset in function.UnresolvedOffsets)
@@ -232,22 +210,17 @@ namespace OldRod.Core.Disassembly.Inference
             {
                 var currentState = agenda.Pop();
 
-                // Check if offset is already visited before.
                 if (function.Instructions.TryGetValue((long) currentState.IP, out var instruction))
                 {
-                    // Check if the (potentially different) key resolves to the same instruction.
                     _decoder.ReaderOffset = (uint) currentState.IP;
                     _decoder.CurrentKey = currentState.Key;
                     
                     ILInstruction instruction2;
-                    if (function.SMCTrampolineOffsetRange.Contains(currentState.IP))
-                        instruction2 = _decoder.ReadNextInstruction(function.SMCTrampolineKey);
-                    else
-                        instruction2 = _decoder.ReadNextInstruction();
+                    if (!TryReadInstruction(function, currentState, out instruction2))
+                        continue;
 
                     if (instruction2.OpCode.Code != instruction.OpCode.Code)
                     {
-                        // This should not happen in vanilla KoiVM.
                         throw new DisassemblyException(
                             $"Detected joining control flow paths in function_{function.EntrypointAddress:X4} "
                               + $"converging to the same offset (IL_{instruction.Offset:X4}) but decoding to different instructions.");
@@ -260,13 +233,9 @@ namespace OldRod.Core.Disassembly.Inference
                 }
                 else
                 {
-                    // Offset is not visited yet, read instruction. 
                     _decoder.ReaderOffset = (uint) currentState.IP;
                     _decoder.CurrentKey = currentState.Key;
 
-                    // If the instruction at the current IP is a block header and a SMC trampoline block
-                    // has not yet been detected, check if we might be entering a SMC trampoline block.
-                    // The check for block headers is a performance improvement.
                     if (SMCTrampolineDetector is not null && function.SMCTrampolineOffsetRange.IsEmpty
                                                           && function.BlockHeaders.Contains((long)currentState.IP)
                                                           && SMCTrampolineDetector.IsSMCTrampoline(currentState, out byte smcKey, out ulong trampolineEnd)) 
@@ -275,10 +244,8 @@ namespace OldRod.Core.Disassembly.Inference
                         function.SMCTrampolineKey = smcKey;
                     }
 
-                    if (function.SMCTrampolineOffsetRange.Contains(currentState.IP))
-                        instruction = _decoder.ReadNextInstruction(function.SMCTrampolineKey);
-                    else
-                        instruction = _decoder.ReadNextInstruction();
+                    if (!TryReadInstruction(function, currentState, out instruction))
+                        continue;
 
                     instruction.ProgramState = currentState;
                     function.Instructions.Add((long) currentState.IP, instruction);
@@ -287,7 +254,6 @@ namespace OldRod.Core.Disassembly.Inference
 
                 currentState.Registers[VMRegisters.IP] = new SymbolicValue(instruction, VMType.Qword);
 
-                // Determine next states.
                 try
                 {
                     foreach (var state in _processor.GetNextStates(function, currentState, instruction,
@@ -303,6 +269,33 @@ namespace OldRod.Core.Disassembly.Inference
             }
 
             return changed;
+        }
+
+        private bool TryReadInstruction(VMFunction function, ProgramState currentState, out ILInstruction instruction)
+        {
+            try
+            {
+                if (function.SMCTrampolineOffsetRange.Contains(currentState.IP))
+                    instruction = _decoder.ReadNextInstruction(function.SMCTrampolineKey);
+                else
+                    instruction = _decoder.ReadNextInstruction();
+
+                return true;
+            }
+            catch (DisassemblyException ex)
+            {
+                bool isFunctionEntrypoint = currentState.IP == function.EntrypointAddress;
+                bool isFirstInstruction = function.Instructions.Count == 0;
+                if (isFunctionEntrypoint && isFirstInstruction)
+                    throw;
+
+                Logger.Warning(Tag,
+                    $"Ignoring invalid control-flow path in function_{function.EntrypointAddress:X4} " +
+                    $"at IL_{currentState.IP:X4}. {ex.Message}");
+
+                instruction = null;
+                return false;
+            }
         }
 
         private Dictionary<uint, ControlFlowGraph> ConstructControlFlowGraphs()
@@ -344,8 +337,6 @@ namespace OldRod.Core.Disassembly.Inference
 
             Logger.Log(Tag, $"Trying to resolve any exit keys using {ExitKeyResolver.Name}...");
             
-            // Collect all functions that do not have an exit key yet, and order then by the amount of references.
-            // The more references, the more information is known about the function.
             var unresolvedFunctions = _functions.Values
                     .Where(f => !f.ExitKey.HasValue)
                     .OrderByDescending(f => f.References.Count)
@@ -360,7 +351,6 @@ namespace OldRod.Core.Disassembly.Inference
                 var exitKey = ExitKeyResolver.ResolveExitKey(Logger, KoiStream, Constants, function);
                 if (exitKey.HasValue)
                 {
-                    // We found an exit key, let's continue disassembly like normal.
                     Logger.Log(Tag,
                         $"Resolved exit key {exitKey.Value:X8} for function_{function.EntrypointAddress:X4}.");
                     function.ExitKey = exitKey;

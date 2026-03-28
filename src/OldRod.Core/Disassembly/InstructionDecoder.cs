@@ -1,20 +1,6 @@
-// Project OldRod - A KoiVM devirtualisation utility.
-// Copyright (C) 2019 Washi
-// 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-// 
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-// 
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
+using System.Linq;
 using AsmResolver.IO;
 using OldRod.Core.Architecture;
 
@@ -133,6 +119,12 @@ namespace OldRod.Core.Disassembly
             return _constants.Registers.TryGetValue(ReadByte(), out register);
         }
 
+        private bool TryReadRegister(out VMRegisters register, out byte rawRegister)
+        {
+            rawRegister = ReadByte();
+            return _constants.Registers.TryGetValue(rawRegister, out register);
+        }
+
         private uint ReadDword()
         {
             return ReadByte()
@@ -155,6 +147,18 @@ namespace OldRod.Core.Disassembly
 
         private object ReadNextOperand(ILOperandType operandType) 
         {
+            if (operandType == ILOperandType.Register)
+            {
+                if (TryReadRegister(out var register, out var rawRegister))
+                    return register;
+
+                string knownRegisters = string.Join(", ",
+                    _constants.Registers.OrderBy(x => x.Key).Select(x => $"0x{x.Key:X2}->{x.Value}"));
+                throw new DisassemblyException(
+                    $"Failed to read Register operand 0x{rawRegister:X2} at stream offset {_reader.Offset - 1:X4}. " +
+                    $"Known register encodings: [{knownRegisters}]");
+            }
+
             if (TryReadNextOperand(operandType, out object operand))
                 return operand;
             throw new DisassemblyException($"Failed to read {operandType} operand!");
@@ -168,7 +172,7 @@ namespace OldRod.Core.Disassembly
                 case ILOperandType.None:
                     return true;
                 case ILOperandType.Register:
-                    if (TryReadRegister(out var register)) 
+                    if (TryReadRegister(out var register))
                     {
                         operand = register;
                         return true;

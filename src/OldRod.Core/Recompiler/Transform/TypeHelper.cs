@@ -1,18 +1,3 @@
-// Project OldRod - A KoiVM devirtualisation utility.
-// Copyright (C) 2019 Washi
-// 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-// 
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-// 
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -81,8 +66,6 @@ namespace OldRod.Core.Recompiler.Transform
             TypeSignature typeSig;
             switch (type)
             {
-                // The base type of an array type signature is System.Array, so it needs a special case. 
-                // Get the type hierarchy of System.Array and then append the original array type sig.
                 case ArrayTypeSignature _:
                 case SzArrayTypeSignature _:
                     result.AddRange(GetTypeHierarchy(_arrayType));
@@ -91,22 +74,17 @@ namespace OldRod.Core.Recompiler.Transform
                 
                 case ByReferenceTypeSignature byRef:
                     result.AddRange(GetTypeHierarchy(byRef.BaseType));
-//                    result.Add(byRef);
                     return result;
                 
-                // Type specification's Resolve method resolves the underlying element type.
-                // We therefore need a special case here, to get the type hierarchy of the embedded signature first.
                 case TypeSpecification typeSpec:
                     result.AddRange(GetTypeHierarchy(typeSpec.Signature));
                     result.Add(typeSpec);
                     return result;
                 
                 case GenericParameterSignature genericParam:
-                    // TODO: Resolve to actual generic parameter type.
                     result.Add(_objectType);
                     return result;
                 
-                // No type means no hierarchy.
                 case null:
                     return Array.Empty<ITypeDescriptor>();
                 
@@ -124,12 +102,9 @@ namespace OldRod.Core.Recompiler.Transform
 
                 result.Add(typeSig);
 
-                var typeDef = typeSig.ToTypeDefOrRef().Resolve();
+                var typeDef = typeSig.ToTypeDefOrRef()?.Resolve();
                 if (typeDef is null)
-                {
-                    throw new ArgumentException(
-                        $"Could not resolve type {typeSig.FullName} in {typeSig.Scope.GetAssembly()}.");
-                }
+                    break;
 
                 if (typeDef.IsEnum)
                     typeSig = typeDef.GetEnumUnderlyingType();
@@ -145,12 +120,19 @@ namespace OldRod.Core.Recompiler.Transform
 
         public bool IsIntegralType(ITypeDescriptor type)
         {
+            if (type == null)
+                return false;
+
             return _integralTypes.Any(x => type.IsTypeOf(x.Namespace, x.Name));
         }
         
         public bool IsOnlyIntegral(IEnumerable<ITypeDescriptor> types)
         {
-            return types.All(IsIntegralType);
+            var typeList = types?
+                .Where(t => t != null)
+                .ToList();
+
+            return typeList?.Count > 0 && typeList.All(IsIntegralType);
         }
 
         public TypeSignature GetBiggestIntegralType(IEnumerable<ITypeDescriptor> types)
@@ -160,6 +142,9 @@ namespace OldRod.Core.Recompiler.Transform
             
             foreach (var type in types)
             {
+                if (type == null)
+                    continue;
+
                 int index = 0;
                 for (index = 0; index < _integralTypes.Count; index++)
                 {
@@ -176,27 +161,47 @@ namespace OldRod.Core.Recompiler.Transform
 
             return biggest;
         }
+
+        private static TypeDefinition SafeResolve(ITypeDescriptor type)
+        {
+            try
+            {
+                return type?.Resolve();
+            }
+            catch
+            {
+                return null;
+            }
+        }
         
         public ITypeDescriptor GetCommonBaseType(ICollection<ITypeDescriptor> types)
         {
-            if (types.Count == 1)
-                return types.First();
-            
-            if (IsOnlyIntegral(types))
-                return GetBiggestIntegralType(types);
+            if (types == null || types.Count == 0)
+                return _objectType;
 
-            // Strategy:
-            // Get each type hierarchy, and walk from least specific (System.Object) to most specific type.
-            // Break when there is a difference between two type hierarchies. This is a branch in the
-            // total type hierarchy graph. 
+            var typeList = types
+                .Where(t => t != null)
+                .ToList();
+
+            if (typeList.Count == 0)
+                return _objectType;
+
+            if (typeList.Count == 1)
+                return typeList[0];
             
-            // TODO: For now we remove interfaces from the list to increase the chance of finding a more specific
-            //       common type. This can be improved.
+            if (IsOnlyIntegral(typeList))
+            {
+                ITypeDescriptor integralType = GetBiggestIntegralType(typeList);
+                return integralType ?? _objectType;
+            }
+
             
-            // Obtain all base types for all types.
-            var hierarchies = types
-                .Where(t => !t.Resolve().IsInterface) 
-                .Select(GetTypeHierarchy).ToList();
+            
+            var hierarchies = typeList
+                .Where(t => SafeResolve(t)?.IsInterface != true)
+                .Select(GetTypeHierarchy)
+                .Where(h => h.Count > 0)
+                .ToList();
             if (hierarchies.Count == 0)
                 return _objectType;
             
@@ -212,8 +217,6 @@ namespace OldRod.Core.Recompiler.Transform
                     var hierarchy = hierarchies[i];
                     if (currentTypeIndex >= hierarchy.Count)
                     {
-                        // Hierarchy is out of types. We can safely ignore this hierarchy any further
-                        // since up to this point, this hierarchy has been exactly the same as the other hierarchies. 
                         hierarchies.RemoveAt(i);
                         i--;
                     }
@@ -223,8 +226,7 @@ namespace OldRod.Core.Recompiler.Transform
                     }
                     else
                     {
-                        // Check if the current hierarchy has branched from the other hierarchies.
-                        if (hierarchy[currentTypeIndex].FullName != nextType.FullName)
+                        if (hierarchy[currentTypeIndex]?.FullName != nextType?.FullName)
                             return commonType;
                     }
                 }
@@ -241,7 +243,8 @@ namespace OldRod.Core.Recompiler.Transform
 
         public bool IsAssignableTo(ITypeDescriptor from, ITypeDescriptor to)
         {
-            if (to == null
+            if (from == null
+                || to == null
                 || from.FullName == to.FullName
                 || from.IsTypeOf("System", "Int32") && to.IsTypeOf("System", "Boolean"))
             {
@@ -252,7 +255,7 @@ namespace OldRod.Core.Recompiler.Transform
                 return false;
 
             var typeHierarchy = GetTypeHierarchy(from);
-            return typeHierarchy.Any(x => x.FullName == to.FullName);
+            return typeHierarchy.Any(x => x?.FullName == to.FullName);
         }
     }
 }

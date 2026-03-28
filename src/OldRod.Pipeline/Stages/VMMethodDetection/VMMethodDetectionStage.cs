@@ -1,21 +1,9 @@
-// Project OldRod - A KoiVM devirtualisation utility.
-// Copyright (C) 2019 Washi
-// 
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-// 
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU General Public License for more details.
-// 
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using AsmResolver.DotNet;
 using AsmResolver.DotNet.Code.Cil;
 using AsmResolver.DotNet.Signatures;
@@ -36,9 +24,6 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
 
         public void Run(DevirtualisationContext context)
         {
-            // KoiVM defines a type VMEntry to bootstrap the virtual machine for a particular method.
-            // Therefore, to detect virtualised methods, we therefore have to detect this type first so that we can 
-            // look for references to one of the Run methods.
 
             if (!context.Options.NoExportMapping)
                 context.VMEntryInfo = ExtractVMEntryInfo(context);
@@ -68,7 +53,6 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
         {
             if (context.Options.OverrideVMEntryToken)
             {
-                // Use user-defined VMEntry type token instead of detecting.
                 
                 context.Logger.Debug(Tag, $"Using token {context.Options.VMEntryToken} for VMEntry type.");
                 var type = (TypeDefinition) context.RuntimeModule.LookupMember(context.Options.VMEntryToken.Value);
@@ -83,7 +67,6 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
             }
             else
             {
-                // Attempt to auto-detect the VMEntry type.
                 
                 context.Logger.Debug(Tag, "Searching for VMEntry type...");
                 var info = SearchVMEntryType(context);
@@ -98,35 +81,91 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
 
         private VMEntryInfo SearchVMEntryType(DevirtualisationContext context)
         {
-            foreach (var type in context.RuntimeModule.Assembly.Modules[0].TopLevelTypes)
+            foreach (var type in context.RuntimeModule.Assembly.Modules[0].GetAllTypes())
             {
-                // TODO: maybe a better matching criteria is required here.
-                if (type.Methods.Count >= 5) 
-                {
-                    var info = TryExtractVMEntryInfoFromType(context, type);
-                    if (info != null)
-                        return info;
-                }
+                var info = TryExtractVMEntryInfoFromType(context, type);
+                if (info != null)
+                    return info;
             }
 
             return null;
         }
 
-        private static bool HasParameterTypes(MethodDefinition method, ICollection<string> expectedTypes)
+        private static bool TryGetExtraParameterCount(MethodDefinition method, ICollection<string> expectedTypes,
+            out int extraParameterCount)
         {
+            if (method.Signature == null)
+            {
+                extraParameterCount = 0;
+                return false;
+            }
+
             expectedTypes = new List<string>(expectedTypes);
+            extraParameterCount = 0;
 
             foreach (var parameter in method.Signature.ParameterTypes)
             {
                 string typeFullName = parameter.FullName;
-                
-                if (!expectedTypes.Contains(typeFullName))
-                    return false;
-                
-                expectedTypes.Remove(typeFullName);
+
+                if (expectedTypes.Contains(typeFullName))
+                {
+                    expectedTypes.Remove(typeFullName);
+                }
+                else
+                {
+                    extraParameterCount++;
+                }
             }
 
-            return true;
+            return expectedTypes.Count == 0;
+        }
+
+        private static bool IsPreferredVmEntryMethodName(string name)
+        {
+            return name == "Run" || name == "Call";
+        }
+
+        private static MethodDefinition FindBestMatchingMethod(TypeDefinition type, ICollection<string> expectedTypes,
+            string returnTypeNamespace, string returnTypeName)
+        {
+            MethodDefinition bestMethod = null;
+            int bestExtraParameterCount = int.MaxValue;
+            int bestPriority = int.MinValue;
+            bool bestHasExpectedReturnType = false;
+
+            foreach (var method in type.Methods)
+            {
+                if (!method.IsStatic)
+                    continue;
+
+                if (!TryGetExtraParameterCount(method, expectedTypes, out int extraParameterCount))
+                    continue;
+
+                bool hasExpectedReturnType = method.Signature.ReturnType.IsTypeOf(returnTypeNamespace, returnTypeName);
+                int priority = 0;
+
+                if (method.IsPublic)
+                    priority += 4;
+                else if (method.IsAssembly)
+                    priority += 2;
+
+                if (IsPreferredVmEntryMethodName(method.Name))
+                    priority += 1;
+
+                if (bestMethod == null
+                    || (hasExpectedReturnType && !bestHasExpectedReturnType)
+                    || (hasExpectedReturnType == bestHasExpectedReturnType
+                        && (extraParameterCount < bestExtraParameterCount
+                            || (extraParameterCount == bestExtraParameterCount && priority > bestPriority))))
+                {
+                    bestMethod = method;
+                    bestExtraParameterCount = extraParameterCount;
+                    bestPriority = priority;
+                    bestHasExpectedReturnType = hasExpectedReturnType;
+                }
+            }
+
+            return bestMethod;
         }
 
         private VMEntryInfo TryExtractVMEntryInfoFromType(DevirtualisationContext context, TypeDefinition type)
@@ -136,20 +175,8 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
                 VMEntryType = type
             };
 
-            foreach (var method in type.Methods)
-            {
-                int count = method.Signature.ParameterTypes.Count;
-                if (count == context.Options.Run1ExpectedTypes.Count)
-                {
-                    if (HasParameterTypes(method, context.Options.Run1ExpectedTypes))
-                        info.RunMethod1 = method;
-                }
-                else if (count == context.Options.Run2ExpectedTypes.Count)
-                {
-                    if (HasParameterTypes(method, context.Options.Run2ExpectedTypes))
-                        info.RunMethod2 = method;
-                }
-            }
+            info.RunMethod1 = FindBestMatchingMethod(type, context.Options.Run1ExpectedTypes, "System", "Object");
+            info.RunMethod2 = FindBestMatchingMethod(type, context.Options.Run2ExpectedTypes, "System", "Void");
 
             if (info.RunMethod1 == null || info.RunMethod2 == null)
                 return null;
@@ -175,9 +202,6 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
         {
             int matchedMethods = 0;
             
-            // Go over all methods in the assembly and detect whether it is virtualised by looking for a call 
-            // to the VMEntry.Run method. If it is, also detect the export ID associated to it to define a mapping
-            // between VMExport and physical method. 
             foreach (var type in context.TargetModule.Assembly.Modules[0].GetAllTypes())
             {
                 foreach (var method in type.Methods)
@@ -202,14 +226,8 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
                 }
             }
                 
-            // There could be more exports defined in the #Koi md stream than we were able to directly match
-            // with methods in the target assembly. It is expected that the HELPER_INIT method is not matched to a
-            // physical method definition, but it could also be that we missed one due to some other form of
-            // obfuscation applied to it (maybe a fork of the vanilla version). 
             
-            // These missing physical methods will later be added, together with the internal functions.
             
-            // Warn if there are more than one method not directly mapped to a physical method definition.
             if (matchedMethods < context.VirtualisedMethods.Count - 1)
             {
                 context.Logger.Warning(Tag, $"Not all VM exports were mapped to physical method definitions "
@@ -232,27 +250,20 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
             
             if (runCall != null)
             {   
-                // Do a very minimal emulation of the method body, we are only interested in ldc.i4 values that push
-                // the export ID. All other values on the stack will have a placeholder of -1.
                 
-                // Note that this strategy only works for variants of KoiVM that have exactly one constant integer
-                // pushed on the stack upon calling the run method. It does NOT detect the export ID when the constant
-                // is masked behind some obfuscation, or when there are multiple integer parameters pushed on the stack. 
                 
-                var stack = new Stack<int>();
+                var stack = new Stack<StackValue>();
                 foreach (var instr in instructions)
                 {
                     if (instr.Offset == runCall.Offset)
                     {
-                        // We reached the call to the run method, obtain the integer value corresponding to the export id.
                         
                         int argCount = instr.GetStackPopCount(methodBody);
                         for (int i = 0; i < argCount; i++)
                         {
-                            int value = stack.Pop();
-                            if (value != -1)
+                            var value = stack.Pop();
+                            if (TryInferExportId(value, out exportId))
                             {
-                                exportId = value;
                                 return true;
                             }
                         }
@@ -262,20 +273,50 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
 
                     if (instr.IsLdcI4())
                     {
-                        // Push the ldc.i4 value if we reach one.
-                        stack.Push(instr.GetLdcI4Constant());
+                        stack.Push(StackValue.FromInteger(instr.GetLdcI4Constant()));
+                    }
+                    else if (instr.OpCode.Code == CilCode.Ldstr)
+                    {
+                        stack.Push(StackValue.FromString(instr.Operand?.ToString()));
                     }
                     else
                     {
-                        // Pop the correct amount of values from the stack, and push placeholders.
                         for (int i = 0; i < instr.GetStackPopCount(methodBody); i++)
                             stack.Pop();
                         for (int i = 0; i < instr.GetStackPushCount(); i++)
-                            stack.Push(-1);
+                            stack.Push(StackValue.Unknown);
                     }
                 }
             }
 
+            return false;
+        }
+
+        private static bool TryInferExportId(StackValue value, out int exportId)
+        {
+            if (value.Integer.HasValue)
+            {
+                exportId = value.Integer.Value;
+                return true;
+            }
+
+            if (!string.IsNullOrEmpty(value.String))
+            {
+                if (int.TryParse(value.String, NumberStyles.Integer, CultureInfo.InvariantCulture, out exportId))
+                    return true;
+
+                try
+                {
+                    string decodedString = Encoding.UTF8.GetString(Convert.FromBase64String(value.String));
+                    if (int.TryParse(decodedString, NumberStyles.Integer, CultureInfo.InvariantCulture, out exportId))
+                        return true;
+                }
+                catch (FormatException)
+                {
+                }
+            }
+
+            exportId = 0;
             return false;
         }
 
@@ -309,7 +350,37 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
                 returnType,
                 parameterTypes.Skip(hasThis ? 1 : 0));
         }
-        
+
+        private readonly struct StackValue
+        {
+            private StackValue(int? integer, string @string)
+            {
+                Integer = integer;
+                String = @string;
+            }
+
+            public static StackValue Unknown => new StackValue(null, null);
+
+            public int? Integer
+            {
+                get;
+            }
+
+            public string String
+            {
+                get;
+            }
+
+            public static StackValue FromInteger(int value)
+            {
+                return new StackValue(value, null);
+            }
+
+            public static StackValue FromString(string value)
+            {
+                return new StackValue(null, value);
+            }
+        }
 
     }
 }
