@@ -11,6 +11,8 @@ What's new:
 - Removed some restriction
 - Added auto detect VMEntry (even when it has junk)
 
+Note: it won't work with all cases
+
 Project Old Rod is released under the GPLv3 license.
 
 Usage:
