@@ -1,3 +1,18 @@
+// Project OldRod - A KoiVM devirtualisation utility.
+// Copyright (C) 2019 Washi
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -66,6 +81,8 @@ namespace OldRod.Core.Recompiler.Transform
             TypeSignature typeSig;
             switch (type)
             {
+                // The base type of an array type signature is System.Array, so it needs a special case. 
+                // Get the type hierarchy of System.Array and then append the original array type sig.
                 case ArrayTypeSignature _:
                 case SzArrayTypeSignature _:
                     result.AddRange(GetTypeHierarchy(_arrayType));
@@ -74,17 +91,22 @@ namespace OldRod.Core.Recompiler.Transform
                 
                 case ByReferenceTypeSignature byRef:
                     result.AddRange(GetTypeHierarchy(byRef.BaseType));
+//                    result.Add(byRef);
                     return result;
                 
+                // Type specification's Resolve method resolves the underlying element type.
+                // We therefore need a special case here, to get the type hierarchy of the embedded signature first.
                 case TypeSpecification typeSpec:
                     result.AddRange(GetTypeHierarchy(typeSpec.Signature));
                     result.Add(typeSpec);
                     return result;
                 
                 case GenericParameterSignature genericParam:
+                    // TODO: Resolve to actual generic parameter type.
                     result.Add(_objectType);
                     return result;
                 
+                // No type means no hierarchy.
                 case null:
                     return Array.Empty<ITypeDescriptor>();
                 
@@ -195,9 +217,16 @@ namespace OldRod.Core.Recompiler.Transform
                 return integralType ?? _objectType;
             }
 
+            // Strategy:
+            // Get each type hierarchy, and walk from least specific (System.Object) to most specific type.
+            // Break when there is a difference between two type hierarchies. This is a branch in the
+            // total type hierarchy graph. 
             
+            // TODO: For now we remove interfaces from the list to increase the chance of finding a more specific
+            //       common type. This can be improved.
             
             var hierarchies = typeList
+            // Obtain all base types for all types.
                 .Where(t => SafeResolve(t)?.IsInterface != true)
                 .Select(GetTypeHierarchy)
                 .Where(h => h.Count > 0)
@@ -217,6 +246,8 @@ namespace OldRod.Core.Recompiler.Transform
                     var hierarchy = hierarchies[i];
                     if (currentTypeIndex >= hierarchy.Count)
                     {
+                        // Hierarchy is out of types. We can safely ignore this hierarchy any further
+                        // since up to this point, this hierarchy has been exactly the same as the other hierarchies. 
                         hierarchies.RemoveAt(i);
                         i--;
                     }
@@ -227,6 +258,7 @@ namespace OldRod.Core.Recompiler.Transform
                     else
                     {
                         if (hierarchy[currentTypeIndex]?.FullName != nextType?.FullName)
+                        // Check if the current hierarchy has branched from the other hierarchies.
                             return commonType;
                     }
                 }

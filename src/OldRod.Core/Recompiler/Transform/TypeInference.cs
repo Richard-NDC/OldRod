@@ -1,3 +1,18 @@
+// Project OldRod - A KoiVM devirtualisation utility.
+// Copyright (C) 2019 Washi
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System.Collections.Generic;
 using System.Linq;
@@ -28,6 +43,8 @@ namespace OldRod.Core.Recompiler.Transform
         {
             bool changed = false;
             
+            // Go over each variable, and figure out the common base type of all the values that are assigned to it.
+            // This is the new variable type.
             foreach (var variable in unit.Variables.Where(x => x.UsedBy.Count > 0))
                 changed |= TryInferVariableType(variable);
 
@@ -39,10 +56,12 @@ namespace OldRod.Core.Recompiler.Transform
 
         private bool TryInferVariableType(CilVariable variable)
         {
+            // Do not update the type of the flags variable.
             if (_context.FlagVariable == variable)
                 return false;
             
             var expectedTypes = CollectExpectedTypes(variable)
+            // Collect expected types.
                 .Where(t => t != null)
                 .ToArray();
 
@@ -71,14 +90,19 @@ namespace OldRod.Core.Recompiler.Transform
                 
                 if (!use.IsReference)
                 {
+                    // Normal read reference to the variable (e.g. using a ldloc or ldarg).
                     expectedTypes.Add(expectedType);
                 }
                 else if (expectedType is ByReferenceTypeSignature byRefType)
                 {
+                    // The variable's address was used (e.g. using a ldloca or ldarga). To avoid the type inference 
+                    // to think that the variable is supposed to be a byref type, we get the base type instead.
                     expectedTypes.Add(byRefType.BaseType);
                 }
                 else
                 {
+                    // If this happens, we probably have an error somewhere in an earlier stage of the recompiler.
+                    // Variable loaded by reference should always have a byref type sig as expected type. 
 
                     throw new RecompilerException(
                         $"Variable {use.Variable.Name} in the expression `{use.Parent}` in "
@@ -128,6 +152,7 @@ namespace OldRod.Core.Recompiler.Transform
 
                 variable.VariableType = newType;
 
+                // Update the expression type of all references to the variable.
                 foreach (var use in variable.UsedBy)
                 {
                     use.ExpressionType = use.IsReference
@@ -135,6 +160,7 @@ namespace OldRod.Core.Recompiler.Transform
                         : newType;
                 }
 
+                // Update the expected type of all expressions that are assigned to the variable.
                 foreach (var assign in variable.AssignedBy)
                     assign.Value.ExpectedType = newType;
 

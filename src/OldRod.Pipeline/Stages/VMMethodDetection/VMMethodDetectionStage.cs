@@ -1,3 +1,18 @@
+// Project OldRod - A KoiVM devirtualisation utility.
+// Copyright (C) 2019 Washi
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -24,6 +39,9 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
 
         public void Run(DevirtualisationContext context)
         {
+            // KoiVM defines a type VMEntry to bootstrap the virtual machine for a particular method.
+            // Therefore, to detect virtualised methods, we therefore have to detect this type first so that we can 
+            // look for references to one of the Run methods.
 
             if (!context.Options.NoExportMapping)
                 context.VMEntryInfo = ExtractVMEntryInfo(context);
@@ -53,6 +71,7 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
         {
             if (context.Options.OverrideVMEntryToken)
             {
+                // Use user-defined VMEntry type token instead of detecting.
                 
                 context.Logger.Debug(Tag, $"Using token {context.Options.VMEntryToken} for VMEntry type.");
                 var type = (TypeDefinition) context.RuntimeModule.LookupMember(context.Options.VMEntryToken.Value);
@@ -67,6 +86,7 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
             }
             else
             {
+                // Attempt to auto-detect the VMEntry type.
                 
                 context.Logger.Debug(Tag, "Searching for VMEntry type...");
                 var info = SearchVMEntryType(context);
@@ -84,6 +104,7 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
             foreach (var type in context.RuntimeModule.Assembly.Modules[0].GetAllTypes())
             {
                 var info = TryExtractVMEntryInfoFromType(context, type);
+                // TODO: maybe a better matching criteria is required here.
                 if (info != null)
                     return info;
             }
@@ -202,6 +223,9 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
         {
             int matchedMethods = 0;
             
+            // Go over all methods in the assembly and detect whether it is virtualised by looking for a call 
+            // to the VMEntry.Run method. If it is, also detect the export ID associated to it to define a mapping
+            // between VMExport and physical method. 
             foreach (var type in context.TargetModule.Assembly.Modules[0].GetAllTypes())
             {
                 foreach (var method in type.Methods)
@@ -226,8 +250,14 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
                 }
             }
                 
+            // There could be more exports defined in the #Koi md stream than we were able to directly match
+            // with methods in the target assembly. It is expected that the HELPER_INIT method is not matched to a
+            // physical method definition, but it could also be that we missed one due to some other form of
+            // obfuscation applied to it (maybe a fork of the vanilla version). 
             
+            // These missing physical methods will later be added, together with the internal functions.
             
+            // Warn if there are more than one method not directly mapped to a physical method definition.
             if (matchedMethods < context.VirtualisedMethods.Count - 1)
             {
                 context.Logger.Warning(Tag, $"Not all VM exports were mapped to physical method definitions "
@@ -250,13 +280,19 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
             
             if (runCall != null)
             {   
+                // Do a very minimal emulation of the method body, we are only interested in ldc.i4 values that push
+                // the export ID. All other values on the stack will have a placeholder of -1.
                 
+                // Note that this strategy only works for variants of KoiVM that have exactly one constant integer
+                // pushed on the stack upon calling the run method. It does NOT detect the export ID when the constant
+                // is masked behind some obfuscation, or when there are multiple integer parameters pushed on the stack. 
                 
                 var stack = new Stack<StackValue>();
                 foreach (var instr in instructions)
                 {
                     if (instr.Offset == runCall.Offset)
                     {
+                        // We reached the call to the run method, obtain the integer value corresponding to the export id.
                         
                         int argCount = instr.GetStackPopCount(methodBody);
                         for (int i = 0; i < argCount; i++)
@@ -274,6 +310,7 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
                     if (instr.IsLdcI4())
                     {
                         stack.Push(StackValue.FromInteger(instr.GetLdcI4Constant()));
+                        // Push the ldc.i4 value if we reach one.
                     }
                     else if (instr.OpCode.Code == CilCode.Ldstr)
                     {
@@ -281,6 +318,7 @@ namespace OldRod.Pipeline.Stages.VMMethodDetection
                     }
                     else
                     {
+                        // Pop the correct amount of values from the stack, and push placeholders.
                         for (int i = 0; i < instr.GetStackPopCount(methodBody); i++)
                             stack.Pop();
                         for (int i = 0; i < instr.GetStackPushCount(); i++)

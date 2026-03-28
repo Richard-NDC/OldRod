@@ -1,3 +1,18 @@
+// Project OldRod - A KoiVM devirtualisation utility.
+// Copyright (C) 2019 Washi
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -57,6 +72,11 @@ namespace OldRod.Pipeline.Stages.ConstantsResolution
                 constants.ConstantFields.Add(field.Key, field.Value);
 
             KeyValuePair<FieldDefinition, byte>[] sortedFields;
+            // TODO:
+            // We assume that the constants appear in the same order as they were defined in the original source code.
+            // This means the metadata tokens of the fields are also in increasing order. However, this could cause
+            // problems when a fork of the obfuscation tool is made which scrambles the order.  A more robust way of
+            // matching should be done that is order agnostic.
             try
             {
                 sortedFields = BuildOrderedConstantSequence(context, fields.OrderedValues);
@@ -159,13 +179,20 @@ namespace OldRod.Pipeline.Stages.ConstantsResolution
             }
             else
             {
+                // Constants type contains a lot of public static byte fields, and only those byte fields. 
+                // Therefore we pattern match on this signature, by finding the type with the most public
+                // static byte fields.
+                // It is unlikely that any other type has that many byte fields, although it is possible.
+                // This could be improved later on.
                 int max = 0;
                 int minimumRequiredConstants = GetRequiredConstantCount();
 
                 foreach (var type in context.RuntimeModule.Assembly.Modules[0].GetAllTypes())
                 {
                     if (type.Fields.Count < minimumRequiredConstants)
+                    // Optimisation: Check first count of all fields. We need at least the amount of opcodes of fields. 
                         continue;
+                    // Count public static byte fields.
 
                     if (!TryParseConstantValues(type, out var parsedConstants))
                         continue;
@@ -185,6 +212,13 @@ namespace OldRod.Pipeline.Stages.ConstantsResolution
         private static bool TryParseConstantValues(TypeDefinition constantsType, out ParsedConstantsTable result)
         {
             try
+            // .cctor initialises the fields using a repetition of the following sequence:
+            //
+            //     ldnull
+            //     ldc.i4 x
+            //     stfld constantfield
+            //
+            // We can simply go over each instruction and "emulate" the ldc.i4 and stfld instructions.
             {
                 result = ParseConstantValues(constantsType);
                 return true;

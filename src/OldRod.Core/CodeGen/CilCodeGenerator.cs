@@ -44,6 +44,7 @@ namespace OldRod.Core.CodeGen
 
         private IDictionary<Node, CilInstruction> _blockEntries;
         private IDictionary<Node, CilInstruction> _blockExits;
+        private CilInstruction _methodEndSentinel;
         
         public CilCodeGenerator(CodeGenerationContext context)
         {
@@ -156,16 +157,28 @@ namespace OldRod.Core.CodeGen
             }
         }
 
-        private ICilLabel GetHandlerEndLabel(CilInstructionCollection result, Node endNode, string type)
+        private ICilLabel GetHandlerEndLabel(CilInstructionCollection result, Node endNode, string _)
         {
-            var instruction = result.GetByOffset(_blockExits[endNode].Offset + _blockExits[endNode].Size);
-            if (instruction is null)
-            {
-                throw new CilCodeGeneratorException(
-                    $"Could not infer end of {type} block in {_context.MethodBody.Owner.Name}.");
-            }
+            if (endNode == null || !_blockExits.TryGetValue(endNode, out var endInstruction))
+                return new CilInstructionLabel(GetOrCreateMethodEndSentinel(result));
+
+            var nextOffset = endInstruction.Offset + endInstruction.Size;
+            var instruction = result.GetByOffset(nextOffset)
+                              ?? result.FirstOrDefault(x => x.Offset > endInstruction.Offset)
+                              ?? GetOrCreateMethodEndSentinel(result);
 
             return new CilInstructionLabel(instruction);
+        }
+
+        private CilInstruction GetOrCreateMethodEndSentinel(CilInstructionCollection result)
+        {
+            if (_methodEndSentinel != null)
+                return _methodEndSentinel;
+
+            _methodEndSentinel = new CilInstruction(CilOpCodes.Nop);
+            result.Add(_methodEndSentinel);
+            result.CalculateOffsets();
+            return _methodEndSentinel;
         }
 
         private static (Node minNode, Node maxNode) FindMinMaxNodes(ICollection<Node> nodes)

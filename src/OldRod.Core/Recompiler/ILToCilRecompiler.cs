@@ -1,3 +1,18 @@
+// Project OldRod - A KoiVM devirtualisation utility.
+// Copyright (C) 2019 Washi
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 using System.Collections.Generic;
@@ -86,6 +101,7 @@ namespace OldRod.Core.Recompiler
         {
             var result = new CilCompilationUnit(unit.ControlFlowGraph);
 
+            // Convert variables.
             foreach (var variable in unit.Variables)
             {
                 switch (variable)
@@ -145,9 +161,11 @@ namespace OldRod.Core.Recompiler
                 result.Variables.Add(flagVariable);
             }
 
+            // Create all Cil blocks.
             foreach (var node in result.ControlFlowGraph.Nodes)
                 node.UserData[CilAstBlock.AstBlockProperty] = new CilAstBlock();
 
+            // Convert all IL blocks.
             foreach (var node in result.ControlFlowGraph.Nodes)
             {
                 var ilBlock = (ILAstBlock) node.UserData[ILAstBlock.AstBlockProperty];
@@ -169,10 +187,15 @@ namespace OldRod.Core.Recompiler
 
         public CilAstNode VisitExpressionStatement(ILExpressionStatement statement)
         {
+            // Compile embedded expression.
             var node = statement.Expression.AcceptVisitor(this);
             
+            // Some recompilers actually recompile the embedded expression directly to a statement (e.g. jump recompilers). 
+            // If the result is just a normal expression, we need to embed it into an expression statement.
             if (node is CilExpression expression)
             {
+                // Check if the expression returned anything, and therefore needs to be popped from the stack
+                // as it is not used.
                 if (expression.ExpressionType != null
                     && !expression.ExpressionType.IsTypeOf("System", "Void"))
                 {
@@ -187,8 +210,10 @@ namespace OldRod.Core.Recompiler
 
         public CilAstNode VisitAssignmentStatement(ILAssignmentStatement statement)
         {
+            // Compile value.
             var cilExpression = (CilExpression) statement.Value.AcceptVisitor(this);
             
+            // Create assignment.
             var cilVariable = _context.Variables[statement.Variable];
 
             cilExpression.ExpectedType = cilVariable.VariableType;
@@ -197,6 +222,7 @@ namespace OldRod.Core.Recompiler
 
         public CilAstNode VisitInstructionExpression(ILInstructionExpression expression)
         {
+            // Jumps and returns are dealt with directly as they produce statements rather than expressions.
 
             if (expression.OpCode.Code == ILCode.LEAVE)
                 return TranslateLeaveExpression(expression);
@@ -210,6 +236,7 @@ namespace OldRod.Core.Recompiler
                 case ILFlowControl.Return:
                     return TranslateRetExpression(expression);
                 default:
+                    // Forward the call to the appropriate recompiler of the opcode.
                     return RecompilerService.GetOpCodeRecompiler(expression.OpCode.Code).Translate(_context, expression);
             }
         }
@@ -219,6 +246,8 @@ namespace OldRod.Core.Recompiler
             var node = expression.GetParentNode();
 
             var opCode = CilOpCodes.Ret;
+            // KoiVM uses ret for exiting finally and filter blocks. Therefore, if it is part of a subgraph,
+            // then adjust accordingly and choose the appropriate opcode and expected return type.
             ITypeDescriptor expectedType = _context.MethodBody.Owner.Signature!.ReturnType;
 
             if (node.SubGraphs.Count > 0)
@@ -254,6 +283,7 @@ namespace OldRod.Core.Recompiler
                 }
             }
 
+            // Build final expression.
             var expr = new CilInstructionExpression(opCode);
             if (expression.Arguments.Count > 0 && opCode != CilOpCodes.Endfinally)
             {
@@ -267,6 +297,7 @@ namespace OldRod.Core.Recompiler
                     $"Ignoring unexpected return value for endfinally emitted at {node.Name}.");
             }
 
+            // Wrap into stand-alone statement.
             return new CilExpressionStatement(expr);
         }
 
@@ -321,6 +352,7 @@ namespace OldRod.Core.Recompiler
 
         private CilStatement TranslateConditionalJumpExpression(ILInstructionExpression expression)
         {
+            // Choose the right opcode.
             switch (expression.OpCode.Code)
             {
                 case ILCode.JZ:
@@ -336,6 +368,7 @@ namespace OldRod.Core.Recompiler
 
         private CilStatement TranslateSimpleCondJumpExpression(ILInstructionExpression expression, CilOpCode opCode)
         {          
+            // Figure out target blocks.
             var currentNode = expression.GetParentNode();
             var trueBlock = (CilAstBlock) currentNode.OutgoingEdges
                 .First(x => x.UserData.ContainsKey(ControlFlowGraph.ConditionProperty))
@@ -347,6 +380,7 @@ namespace OldRod.Core.Recompiler
                 .Target
                 .UserData[CilAstBlock.AstBlockProperty];
 
+            // Create conditional jump.
             var conditionalBranch = new CilInstructionExpression(opCode,
                 new CilInstructionLabel(trueBlock.BlockHeader));
             conditionalBranch.Arguments.Add((CilExpression) expression.Arguments[0].AcceptVisitor(this));
@@ -355,8 +389,11 @@ namespace OldRod.Core.Recompiler
             {
                 Statements =
                 {
+                    // Add conditional jump.
                     new CilExpressionStatement(conditionalBranch),
                     
+                    // Create fall through jump:
+                    // TODO: optimise away in code generator?
                     new CilExpressionStatement(new CilInstructionExpression(CilOpCodes.Br, 
                         new CilInstructionLabel(falseBlock.BlockHeader))),
                 }
@@ -373,12 +410,15 @@ namespace OldRod.Core.Recompiler
             {
                 var targetBlock = (CilAstBlock) edge.Target.UserData[CilAstBlock.AstBlockProperty];
                 
+                // Check if the branch contains any conditions.
                 if (edge.UserData.TryGetValue(ControlFlowGraph.ConditionProperty, out var c))
                 {
+                    // Collect all block targets.
                     var conditions = (IEnumerable<int>) c;
                     
                     foreach (int condition in conditions)
                     {
+                        // Ignore abnormal (EH) edges.
                         if (condition != ControlFlowGraph.ExceptionConditionLabel
                             && condition != ControlFlowGraph.EndFinallyConditionLabel)
                         {
@@ -387,10 +427,12 @@ namespace OldRod.Core.Recompiler
                     } 
                         
                 }
+                // Fall-through edge = the default case.
                 else if (defaultBlock == null)
                 {
                     defaultBlock = targetBlock;
                 }
+                // Sanity check: Multiple fall-through edges should be impossible.
                 else
                 {
                     throw new RecompilerException(
@@ -400,6 +442,7 @@ namespace OldRod.Core.Recompiler
                 }
             }
 
+            // Sanity check: A switch should have one default edge.
             if (defaultBlock == null)
             {
                 throw new RecompilerException(
@@ -408,15 +451,19 @@ namespace OldRod.Core.Recompiler
                     + "the control flow graphs generated by the IL AST builder and each transform.");
             }
 
+            // Construct labels array, and fill up the gaps.
             var caseLabels = new List<CilAstBlock>(caseBlocks.Count);
             foreach (var entry in caseBlocks.OrderBy(e => e.Key))
             {
+                // Fill up the gaps with labels to the default case.
                 for (int i = caseLabels.Count; i < entry.Key; i++)
                     caseLabels.Add(defaultBlock);
                 
+                // Add label to target case block.
                 caseLabels.Add(entry.Value);
             }
 
+            // Construct switch.
             var valueExpression = (CilExpression) expression.Arguments[1].AcceptVisitor(this);
             valueExpression.ExpectedType = _context.TargetModule.CorLibTypeFactory.Int32;
             
@@ -430,8 +477,11 @@ namespace OldRod.Core.Recompiler
             {
                 Statements =
                 {
+                    // Add conditional jump.
                     new CilExpressionStatement(switchExpression),
 
+                    // Create fall through jump:
+                    // TODO: optimise away in code generator?
                     new CilExpressionStatement(new CilInstructionExpression(CilOpCodes.Br,
                         new CilInstructionLabel(defaultBlock.BlockHeader))),
                 }
@@ -473,7 +523,11 @@ namespace OldRod.Core.Recompiler
 
         public CilAstNode VisitPhiExpression(ILPhiExpression expression)
         {
+            // This method should never be reached.
             
+            // If it does, that means the IL AST builder did not clean up all phi nodes,
+            // which could mean there is an error in one of the transformations that the
+            // IL AST builder performs.
             
             throw new RecompilerException(
                 "Encountered a stray phi node in the IL AST. This could mean the IL AST builder contains a "
@@ -483,6 +537,7 @@ namespace OldRod.Core.Recompiler
 
         public CilAstNode VisitExceptionExpression(ILExceptionExpression expression)
         {
+            // HACK: Leave the exception object on the stack.
             return new CilInstructionExpression(CilOpCodes.Nop)
             {
                 ExpressionType = expression.ExceptionType

@@ -1,3 +1,18 @@
+// Project OldRod - A KoiVM devirtualisation utility.
+// Copyright (C) 2019 Washi
+// 
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+// 
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 using System.Linq;
 using AsmResolver.DotNet;
@@ -22,11 +37,15 @@ namespace OldRod.Core.Recompiler.Transform
 
         public override bool VisitInstructionExpression(CilInstructionExpression expression)
         {
+            // KoiVM emits pushi_dword or pushi_qwords not only for pushing integers, but also for pushing null or 
+            // floating point numbers as well. 
             if (TryOptimizeLdcI(expression))
                 return true;
             
+            // Insert conversions in all arguments.
             bool changed = base.VisitInstructionExpression(expression);
 
+            // Ensure type safety for all processed arguments. 
             foreach (var argument in expression.Arguments.ToArray())
                 changed |= EnsureTypeSafety(argument);
 
@@ -52,12 +71,16 @@ namespace OldRod.Core.Recompiler.Transform
                 {
                     if (i4Value == 0)
                     {
+                        // If ldc.i4.0 and expected type is a ref type, the ldc.i4.0 pushes null. We can therefore
+                        // optimize to ldnull.
                         ReplaceWithSingleInstruction(expression, new CilInstruction(CilOpCodes.Ldnull));
                         return true;
                     }
                 }
                 else if (expression.ExpectedType.IsTypeOf("System", "Single"))
                 {
+                    // KoiVM pushes floats using the pushi_dword instruction. Convert to ldc.r4 if a float is expected
+                    // but an ldc.i4 instruction is pushing the value.
                     float actualValue = *(float*) &i4Value;
                     ReplaceWithSingleInstruction(expression, new CilInstruction(CilOpCodes.Ldc_R4, actualValue));
                     return true;
@@ -65,6 +88,8 @@ namespace OldRod.Core.Recompiler.Transform
             }
             else if (instruction.OpCode.Code == CilCode.Ldc_I8 && expression.ExpectedType.IsTypeOf("System", "Double"))
             {
+                // KoiVM pushes doubles using the pushi_qword instruction. Convert to ldc.r8 if a double is expected
+                // but an ldc.i8 instruction is pushing the value.
                 long i8Value = (long) instruction.Operand;
                 double actualValue = *(double*) &i8Value;
                 ReplaceWithSingleInstruction(expression, new CilInstruction(CilOpCodes.Ldc_R8, actualValue));
@@ -92,15 +117,18 @@ namespace OldRod.Core.Recompiler.Transform
             {
                 if (!argument.ExpressionType.IsValueType && argument.ExpectedType.IsValueType)
                 {
+                    // Reference type -> Value type.
                     changed = ConvertRefTypeToValueType(argument);
                 }
                 else if (!argument.ExpressionType.IsValueType && !argument.ExpectedType.IsValueType)
                 {
+                    // Reference type -> Reference type.
                     CastClass(argument);
                     changed = true;
                 }
                 else if (argument.ExpressionType.IsValueType && !argument.ExpectedType.IsValueType)
                 {
+                    // Value type -> Reference type.
                     var newArg = Box(argument);
                     if (!newArg.ExpectedType.IsTypeOf("System", "Object"))
                         CastClass(newArg);
@@ -110,6 +138,7 @@ namespace OldRod.Core.Recompiler.Transform
                 else if (argument.ExpressionType.IsValueType && argument.ExpectedType.IsValueType)
                 {
                     changed = !ReferenceEquals(ConvertValueType(argument), argument);
+                    // Value type -> Value type.
                 }
             }
 
@@ -129,15 +158,19 @@ namespace OldRod.Core.Recompiler.Transform
                     switch (e.Instructions[0].OpCode.Code)
                     {
                         case CilCode.Ldind_Ref:
+                            // Load from pointer.
                             LdObj(e);
                             break;
 
                         case CilCode.Box:
+                            // If argument is a box expression, then we can apply an optimisation; remove both
+                            // box and unbox, and convert the embedded expression directly:
                             e.Arguments[0].ExpectedType = argument.ExpectedType;
                             argument.ReplaceWith(ConvertValueType(e.Arguments[0]).Remove());
                             return true;
 
                         default:
+                            // Argument is something else. We need to unbox.
                             UnboxAny(argument);
                             break;
                     }
@@ -244,14 +277,18 @@ namespace OldRod.Core.Recompiler.Transform
                 var typeDef = argument.ExpectedType.Resolve();
 
                 if (typeDef?.IsEnum == true)
+                // If the expected type is an enum, we might not even need the type conversion in the first place.
+                // Check the enum underlying type if it's indeed the case.
                 {
                     var underlyingType = typeDef.GetEnumUnderlyingType();
                     if (underlyingType != null && argument.ExpressionType.FullName == underlyingType.FullName)
                     {
+                        // Enum type is the same as the expression type, we don't need an explicit conversion.
                         argument.ExpressionType = argument.ExpectedType;
                         return argument;
                     }
                     
+                    // Types still mismatch, we need the explicit conversion.
                     corlibType = _context.TargetModule.CorLibTypeFactory.FromType(underlyingType);
                 }
                 
