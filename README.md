@@ -6,12 +6,12 @@ Project Old Rod is an automated command-line utility that attempts to disassembl
 
 This project is a fork of Old Rod.
 
-What's new:
-- Added auto detect KoiStream (it can also detect KoiStream of renamed/simple modded version)
-- Removed some restriction
-- Added auto detect VMEntry (even when it has junk)
+## What's new
+- Added automatic detection of KoiStream (including renamed or lightly modified versions)
+- Removed some restrictions
+- Added automatic detection of VMEntry (even with junk code)
 
-Note: it won't work with all cases
+> Note: This tool may not work in all cases.
 
 Project Old Rod is released under the GPLv3 license.
 
