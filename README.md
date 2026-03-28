@@ -4,6 +4,15 @@ Project Old Rod - KoiVM Devirtualisation tool
 
 Project Old Rod is an automated command-line utility that attempts to disassemble any .NET application protected by the KoiVM virtualiser plugin for ConfuserEx. Additionally, it tries to recompile the VM code back to .NET CIL in an attempt to recover the original code. 
 
+This project is a fork of Old Rod.
+
+## What's new
+- Added automatic detection of KoiStream (including renamed or lightly modified versions)
+- Removed some restrictions
+- Added automatic detection of VMEntry (even with junk code)
+
+> Note: This tool may not work in all cases.
+
 Project Old Rod is released under the GPLv3 license.
 
 Usage:
